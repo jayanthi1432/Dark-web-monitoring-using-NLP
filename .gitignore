@@ -5,3 +5,9 @@ __pycache__/
 .env
 .streamlit/secrets.toml
 .DS_Store
+-----------
+venv/ → Prevents the virtual environment from being uploaded.
+__pycache__/ → Excludes unnecessary Python cache files.
+.env → Prevents API keys and other secrets from being accidentally uploaded.
+.streamlit/secrets.toml → Keeps Streamlit secrets, such as the VirusTotal API key, private.
+*.pyc → Excludes compiled Python files.
