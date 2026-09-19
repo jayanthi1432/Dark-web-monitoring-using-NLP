@@ -1,0 +1,265 @@
+import streamlit as st
+import pickle
+import time
+import requests
+import base64
+import feedparser
+import pandas as pd
+import matplotlib.pyplot as plt
+import random
+
+from utils.preprocess import clean_text
+from utils.keywords import keyword_alert
+
+# -------------------------------
+# LOAD MODEL + VECTORIZER
+# -------------------------------
+model = pickle.load(open("models/xgb_model.pkl", "rb"))
+vectorizer = pickle.load(open("models/vectorizer.pkl", "rb"))
+
+# -------------------------------
+# VIRUSTOTAL API
+# -------------------------------
+API_KEY = "5e366258bc555545402e3ee9e32618400267b871c9b48e28a39ec0658aa32e76"
+
+def get_url_report(url):
+    try:
+        url_id = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
+        api_url = f"https://www.virustotal.com/api/v3/urls/{url_id}"
+        headers = {"x-apikey": API_KEY}
+        return requests.get(api_url, headers=headers).json()
+    except:
+        return None
+
+# -------------------------------
+# ALERT SOUND
+# -------------------------------
+def play_alert():
+    try:
+        audio_file = open("alert.mp3", "rb")
+        st.audio(audio_file.read(), format="audio/mp3")
+    except:
+        pass
+
+# -------------------------------
+# LIVE FEED
+# -------------------------------
+def get_live_feed():
+    feed = feedparser.parse("https://feeds.feedburner.com/TheHackersNews")
+    for entry in feed.entries[:5]:
+        yield entry.title + " " + entry.summary
+
+# -------------------------------
+# STREAMLIT CONFIG
+# -------------------------------
+st.set_page_config(page_title="Cyber SOC Dashboard", layout="wide")
+
+# -------------------------------
+# SESSION STATE
+# -------------------------------
+if "safe_count" not in st.session_state:
+    st.session_state.safe_count = 0
+if "threat_count" not in st.session_state:
+    st.session_state.threat_count = 0
+if "logs" not in st.session_state:
+    st.session_state.logs = []
+
+# -------------------------------
+# UI TITLE
+# -------------------------------
+st.title("🛡️ Cyber Threat Intelligence SOC Dashboard")
+
+# -------------------------------
+# METRICS
+# -------------------------------
+col1, col2, col3 = st.columns(3)
+col1.metric("🟢 Safe", st.session_state.safe_count)
+col2.metric("🔴 Threats", st.session_state.threat_count)
+col3.metric("📡 Total", st.session_state.safe_count + st.session_state.threat_count)
+
+# -------------------------------
+# ANALYSIS SECTION
+# -------------------------------
+st.subheader("🔍 Threat Analysis")
+user_input = st.text_input("Enter URL or suspicious text")
+
+if st.button("Analyze"):
+
+    if not user_input.strip():
+        st.warning("Please enter input")
+    else:
+
+        # ---------------- CLEAN TEXT ----------------
+        cleaned = clean_text(user_input)
+
+        # ---------------- VECTORIZE ----------------
+        vector = vectorizer.transform([cleaned])
+
+        # ---------------- PREDICTION ----------------
+        proba = model.predict_proba(vector)[0]
+
+        # FIX: correct index mapping
+        if hasattr(model, "classes_"):
+            threat_index = list(model.classes_).index(1)
+            confidence = round(proba[threat_index] * 100, 2)
+        else:
+            confidence = round(proba[1] * 100, 2)
+
+        prediction = model.predict(vector)[0]
+
+        # ---------------- URL CHECK ----------------
+        is_url = user_input.startswith("http") or "." in user_input
+
+        severity = "Low"
+        result = "Safe"
+
+        # ---------------- VIRUSTOTAL ----------------
+        if is_url:
+            vt = get_url_report(user_input)
+            vt_mal = 0
+            try:
+                vt_mal = vt["data"]["attributes"]["last_analysis_stats"]["malicious"]
+            except:
+                pass
+
+            if vt_mal > 0:
+                severity = "High"
+                result = "Confirmed Threat"
+
+        # ---------------- ML RESULT ----------------
+        if prediction == 1 and severity != "High":
+            severity = "High"
+            result = "Confirmed Threat"
+
+        elif confidence > 75 and severity != "High":
+            severity = "Medium"
+            result = "Suspicious"
+
+        elif keyword_alert(user_input) and severity == "Low":
+            severity = "Medium"
+            result = "Suspicious"
+
+        # ---------------- DISPLAY ----------------
+        if severity == "High":
+            st.markdown('<p style="color:red;font-size:20px;">🛑 HIGH RISK THREAT DETECTED</p>', unsafe_allow_html=True)
+            play_alert()
+
+        elif severity == "Medium":
+            st.warning("⚠️ Suspicious Activity Detected")
+
+        else:
+            st.success("✅ Safe Input")
+
+        # ---------------- CONFIDENCE ----------------
+        st.markdown("### 🎯 Model Confidence")
+        st.progress(min(int(confidence), 100))
+        st.write(f"Threat Probability: {confidence}%")
+
+        # ---------------- COUNTERS ----------------
+        if severity == "Low":
+            st.session_state.safe_count += 1
+        else:
+            st.session_state.threat_count += 1
+
+        # ---------------- LOGGING ----------------
+        st.session_state.logs.append({
+            "Input": user_input[:50],
+            "Result": result,
+            "Severity": severity,
+            "Confidence": confidence
+        })
+
+# -------------------------------
+# LIVE FEED
+# -------------------------------
+st.subheader("📡 Live Cyber Feed")
+
+if st.button("Start Monitoring"):
+    for text in get_live_feed():
+        st.info(text[:200])
+
+        cleaned = clean_text(text)
+        vector = vectorizer.transform([cleaned])
+        proba = model.predict_proba(vector)[0]
+
+        threat_index = list(model.classes_).index(1)
+        confidence = proba[threat_index]
+
+        if confidence > 0.75:
+            st.markdown('<p style="color:red;">⚠️ Threat Detected in Feed</p>', unsafe_allow_html=True)
+        else:
+            st.success("Safe")
+
+        time.sleep(2)
+
+# -------------------------------
+# LOG TABLE
+# -------------------------------
+st.subheader("🗄️ Threat Logs")
+
+if st.session_state.logs:
+    df = pd.DataFrame(st.session_state.logs)
+    st.dataframe(df, use_container_width=True)
+
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button("⬇️ Download CSV", csv, "report.csv", "text/csv")
+
+# -------------------------------
+# ANALYTICS
+# -------------------------------
+st.subheader("📊 Analytics Dashboard")
+
+safe = st.session_state.safe_count
+threat = st.session_state.threat_count
+
+col1, col2 = st.columns(2)
+
+with col1:
+    if safe + threat > 0:
+        fig, ax = plt.subplots()
+        ax.pie([safe, threat], labels=["Safe", "Threat"], autopct="%1.1f%%")
+        st.pyplot(fig)
+
+with col2:
+    fig2, ax2 = plt.subplots()
+    ax2.bar(["Safe", "Threat"], [safe, threat])
+    st.pyplot(fig2)
+
+# -------------------------------
+# TREND
+# -------------------------------
+st.subheader("📈 Activity Trend")
+
+if st.session_state.logs:
+    trend_df = pd.DataFrame(st.session_state.logs)
+    trend_df["Index"] = range(len(trend_df))
+
+    fig3, ax3 = plt.subplots()
+    ax3.plot(trend_df["Index"], [1 if s == "High" else 0 for s in trend_df["Severity"]])
+    st.pyplot(fig3)
+
+# -------------------------------
+# ATTACK MAP
+# -------------------------------
+st.subheader("🌍 Simulated Attack Map")
+
+if st.session_state.logs:
+    map_data = []
+
+    for log in st.session_state.logs:
+        if log["Severity"] == "High":
+            map_data.append({
+                "lat": random.uniform(-60, 60),
+                "lon": random.uniform(-120, 120)
+            })
+
+    if map_data:
+        st.map(pd.DataFrame(map_data))
+    else:
+        st.info("No high-risk attacks yet")
+
+# -------------------------------
+# FOOTER
+# -------------------------------
+st.markdown("---")
+st.markdown("🚀 SOC-Level Cyber Threat Monitoring System (Fixed Version)")
